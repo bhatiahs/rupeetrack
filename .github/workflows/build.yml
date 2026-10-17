@@ -35,13 +35,80 @@ jobs:
             sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' "$manifest" || true
           done
 
-      - name: Fix CsvExporter Quotes and AnalyticsScreen Fields
+      - name: Overwrite CsvExporter with Safe Quotes Filter
         run: |
           for csv_file in $(find . -name "CsvExporter.kt"); do
-            echo "Patching $csv_file..."
-            sed -i "s/replace(\"\"\", \"\"\"\")/replace('\"', '\'')/g" "$csv_file" || true
-            sed -i "s/replace(\"\"\", \"\"\"/replace('\"', '\''/g" "$csv_file" || true
+            echo "Writing safe CsvExporter to: $csv_file"
+            cat << 'EOF' > "$csv_file"
+          package com.expensetracker.upi.export
+
+          import android.content.Context
+          import android.content.Intent
+          import androidx.core.content.FileProvider
+          import com.expensetracker.upi.data.TransactionEntity
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          object CsvExporter {
+
+              fun generateAndShareCsv(context: Context, transactions: List<TransactionEntity>) {
+                  val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                  val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                  val exportDate = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+
+                  val csvHeader = "ID,Date,Time,Merchant / Payee,Category,Amount (INR),Type,Payment Mode,Ref / UPI ID,Account,Source SMS\n"
+                  val csvBody = StringBuilder()
+
+                  for (tx in transactions) {
+                      val date = Date(tx.timestamp)
+                      val cleanMerchant = tx.merchant.filter { it != '"' }
+                      val cleanSms = (tx.rawSms ?: "").filter { it != '"' }.replace('\n', ' ')
+
+                      csvBody.append(
+                          "${tx.id}," +
+                          "\"${dateFormat.format(date)}\"," +
+                          "\"${timeFormat.format(date)}\"," +
+                          "\"$cleanMerchant\"," +
+                          "\"${tx.category.displayName}\"," +
+                          "${"%.2f".format(tx.amount)}," +
+                          "${tx.type.name}," +
+                          "${tx.paymentMode.name}," +
+                          "\"${tx.vpaOrRef ?: ""}\"," +
+                          "\"${tx.accountInfo ?: ""}\"," +
+                          "\"$cleanSms\"\n"
+                      )
+                  }
+
+                  val exportDir = File(context.cacheDir, "exports")
+                  exportDir.mkdirs()
+                  val file = File(exportDir, "RupeeTrack_Expenses_$exportDate.csv")
+                  file.writeText(csvHeader + csvBody.toString())
+
+                  val uri = FileProvider.getUriForFile(
+                      context,
+                      "${context.packageName}.fileprovider",
+                      file
+                  )
+
+                  val intent = Intent(Intent.ACTION_SEND).apply {
+                      type = "text/csv"
+                      putExtra(Intent.EXTRA_STREAM, uri)
+                      putExtra(Intent.EXTRA_SUBJECT, "RupeeTrack Expenses Export ($exportDate)")
+                      putExtra(Intent.EXTRA_TEXT, "Here is my UPI and Bank expenses export from RupeeTrack in CSV format.")
+                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+
+                  val chooser = Intent.createChooser(intent, "Export / Upload to Google Drive")
+                  chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  context.startActivity(chooser)
+              }
+          }
+          EOF
           done
+
+      - name: Patch AnalyticsScreen Legacy References
+        run: |
           for analytics_file in $(find . -name "AnalyticsScreen.kt"); do
             echo "Patching $analytics_file..."
             sed -i 's/state\.currentMonthName/state.periodLabel/g' "$analytics_file" || true
