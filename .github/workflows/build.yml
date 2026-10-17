@@ -19,24 +19,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Inspect and Unpack Any Zip Archive
+      - name: Unpack Any Zip Archive
         run: |
-          echo "=== Checking repository contents ==="
-          ls -la
-          
-          # Find any uploaded zip file
-          ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
-          if [ -n "$ZIP_FILE" ]; then
-            echo "Unpacking $ZIP_FILE..."
-            unzip -o "$ZIP_FILE"
-          fi
-
-          # If files unpacked inside a subfolder, bring them to root
-          SUBDIR=$(find . -maxdepth 2 -type d -name "ExpenseTrackerUPI" | head -n 1)
-          if [ -n "$SUBDIR" ]; then
-            echo "Moving files from $SUBDIR to root..."
-            cp -rn "$SUBDIR"/* . || true
-          fi
+          echo "=== Scanning for zip archives ==="
+          for z in $(find . -type f -iname "*.zip"); do
+            echo "Unpacking: $z"
+            unzip -o "$z"
+          done
 
       - name: Fix Missing Launcher Icons
         run: |
@@ -216,8 +205,15 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          if [ ! -f "build.gradle.kts" ] && [ -d "ExpenseTrackerUPI" ]; then
-            cd ExpenseTrackerUPI
+          SETTINGS_PATH=$(find . -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1)
+          if [ -n "$SETTINGS_PATH" ]; then
+            BUILD_DIR=$(dirname "$SETTINGS_PATH")
+            echo "Entering Gradle project directory: $BUILD_DIR"
+            cd "$BUILD_DIR"
+          else
+            echo "Error: settings.gradle.kts not found. Current directory contents:"
+            ls -la
+            exit 1
           fi
           gradle assembleDebug --stacktrace
 
