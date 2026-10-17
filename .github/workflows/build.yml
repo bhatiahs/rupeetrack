@@ -19,29 +19,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Unpack Project Zip
+      - name: Inspect and Unpack Any Zip Archive
         run: |
-          shopt -s nullglob
-          zip_files=(*.zip)
-          if [ ${#zip_files[@]} -gt 0 ]; then
-            echo "Unpacking ${zip_files[0]}..."
-            unzip -o "${zip_files[0]}"
-            rm "${zip_files[0]}"
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git add .
-            git commit -m "Auto-unzip project files from archive" || true
-            git push || true
+          echo "=== Checking repository contents ==="
+          ls -la
+          
+          # Find any uploaded zip file
+          ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Unpacking $ZIP_FILE..."
+            unzip -o "$ZIP_FILE"
+          fi
+
+          # If files unpacked inside a subfolder, bring them to root
+          SUBDIR=$(find . -maxdepth 2 -type d -name "ExpenseTrackerUPI" | head -n 1)
+          if [ -n "$SUBDIR" ]; then
+            echo "Moving files from $SUBDIR to root..."
+            cp -rn "$SUBDIR"/* . || true
           fi
 
       - name: Fix Missing Launcher Icons
         run: |
-          sed -i 's/android:icon="@mipmap\/ic_launcher"//g' app/src/main/AndroidManifest.xml
-          sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' app/src/main/AndroidManifest.xml
+          for manifest in $(find . -name "AndroidManifest.xml"); do
+            echo "Patching manifest at: $manifest"
+            sed -i 's/android:icon="@mipmap\/ic_launcher"//g' "$manifest" || true
+            sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' "$manifest" || true
+          done
 
       - name: Fix SmsParser Regex Escapes
         run: |
-          cat << 'EOF' > app/src/main/java/com/expensetracker/upi/sms/SmsParser.kt
+          for parser in $(find . -name "SmsParser.kt"); do
+            echo "Patching parser at: $parser"
+            cat << 'EOF' > "$parser"
           package com.expensetracker.upi.sms
 
           import com.expensetracker.upi.model.ParsedTransaction
@@ -56,8 +65,37 @@ jobs:
                   Pattern.CASE_INSENSITIVE
               )
 
-              private val debitKeywords = listOf("debited", "spent", "paid", "sent", "charged", "withdrawn", "transferred to", "vpa")
-              private val creditKeywords = listOf("credited", "received", "refunded", "added to", "cashback")
+              private val debitKeywords = listOf(
+                  "debited", "was debited", "is debited", "has been debited",
+                  "paid rs", "spent rs", "sent rs", "transferred to", "vpa",
+                  "withdrawn", "charged to"
+              )
+
+              private val creditKeywords = listOf("credited", "received", "refunded", "cashback")
+
+              private val ignorePatterns = listOf(
+                  """\bdue\s+date\b""",
+                  """\bdue\s+on\b""",
+                  """\bis\s+due\b""",
+                  """\bbill\s+(?:is\s+)?generated\b""",
+                  """\bbill\s+of\s+(?:rs\.?|inr)\b""",
+                  """\bmin(?:imum)?\s+amount\s+due\b""",
+                  """\btotal\s+amount\s+due\b""",
+                  """\bpay\s+before\b""",
+                  """\bpay\s+by\b""",
+                  """\bpay\s+now\b""",
+                  """\bpayment\s+reminder\b""",
+                  """\bbill\s+reminder\b""",
+                  """\breminder:?\b""",
+                  """\botp\b""",
+                  """\bone\s*time\s*password\b""",
+                  """\bverification\s*code\b""",
+                  """\bdo\s+not\s+share\b""",
+                  """\bcollect\s+request\b""",
+                  """\bhas\s+requested\b""",
+                  """\bpre-?approved\b""",
+                  """\bapply\s+now\b"""
+              ).map { Pattern.compile(it, Pattern.CASE_INSENSITIVE) }
 
               private val refPattern = Pattern.compile(
                   """(?:ref\s*(?:no\.?)?|utr|txn\s*id|upi\s*ref)\s*[:\-]?\s*([A-Za-z0-9]+)""",
@@ -81,6 +119,17 @@ jobs:
 
               fun parse(smsBody: String, sender: String, timestamp: Long = System.currentTimeMillis()): ParsedTransaction? {
                   val lowerText = smsBody.lowercase()
+
+                  if (lowerText.contains("otp") || lowerText.contains("verification code") || lowerText.contains("one time password")) {
+                      return null
+                  }
+
+                  val isBillReminder = ignorePatterns.any { it.matcher(smsBody).find() }
+                  val hasExplicitAccountDebit = lowerText.contains("debited") || lowerText.contains("was debited") || lowerText.contains("is debited")
+
+                  if (isBillReminder && !hasExplicitAccountDebit) {
+                      return null
+                  }
 
                   val isDebit = debitKeywords.any { lowerText.contains(it) }
                   val isCredit = creditKeywords.any { lowerText.contains(it) }
@@ -152,6 +201,7 @@ jobs:
               }
           }
           EOF
+          done
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -165,12 +215,16 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: |
+          if [ ! -f "build.gradle.kts" ] && [ -d "ExpenseTrackerUPI" ]; then
+            cd ExpenseTrackerUPI
+          fi
+          gradle assembleDebug --stacktrace
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: RupeeTrack-Debug-APK
-          path: app/build/outputs/apk/debug/*.apk
+          path: "**/build/outputs/apk/debug/*.apk"
           if-no-files-found: error
           
