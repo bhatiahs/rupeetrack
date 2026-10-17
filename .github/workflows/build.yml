@@ -35,6 +35,19 @@ jobs:
             sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' "$manifest" || true
           done
 
+      - name: Fix CsvExporter Quotes and AnalyticsScreen Fields
+        run: |
+          for csv_file in $(find . -name "CsvExporter.kt"); do
+            echo "Patching $csv_file..."
+            sed -i "s/replace(\"\"\", \"\"\"\")/replace('\"', '\'')/g" "$csv_file" || true
+            sed -i "s/replace(\"\"\", \"\"\"/replace('\"', '\''/g" "$csv_file" || true
+          done
+          for analytics_file in $(find . -name "AnalyticsScreen.kt"); do
+            echo "Patching $analytics_file..."
+            sed -i 's/state\.currentMonthName/state.periodLabel/g' "$analytics_file" || true
+            sed -i 's/state\.totalSpendThisMonth/state.totalSpend/g' "$analytics_file" || true
+          done
+
       - name: Fix SmsParser Regex Escapes
         run: |
           for parser in $(find . -name "SmsParser.kt"); do
@@ -211,7 +224,7 @@ jobs:
             echo "Entering Gradle project directory: $BUILD_DIR"
             cd "$BUILD_DIR"
           else
-            echo "Error: settings.gradle.kts not found. Current directory contents:"
+            echo "Error: settings.gradle.kts not found. Listing workspace files:"
             ls -la
             exit 1
           fi
