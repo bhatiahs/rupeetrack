@@ -39,6 +39,120 @@ jobs:
           sed -i 's/android:icon="@mipmap\/ic_launcher"//g' app/src/main/AndroidManifest.xml
           sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' app/src/main/AndroidManifest.xml
 
+      - name: Fix SmsParser Regex Escapes
+        run: |
+          cat << 'EOF' > app/src/main/java/com/expensetracker/upi/sms/SmsParser.kt
+          package com.expensetracker.upi.sms
+
+          import com.expensetracker.upi.model.ParsedTransaction
+          import com.expensetracker.upi.model.PaymentMode
+          import com.expensetracker.upi.model.TransactionType
+          import java.util.regex.Pattern
+
+          object SmsParser {
+
+              private val amountPattern = Pattern.compile(
+                  """(?:(?:rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)|([\d,]+(?:\.\d{1,2})?)\s*(?:rs\.?|inr))""",
+                  Pattern.CASE_INSENSITIVE
+              )
+
+              private val debitKeywords = listOf("debited", "spent", "paid", "sent", "charged", "withdrawn", "transferred to", "vpa")
+              private val creditKeywords = listOf("credited", "received", "refunded", "added to", "cashback")
+
+              private val refPattern = Pattern.compile(
+                  """(?:ref\s*(?:no\.?)?|utr|txn\s*id|upi\s*ref)\s*[:\-]?\s*([A-Za-z0-9]+)""",
+                  Pattern.CASE_INSENSITIVE
+              )
+
+              private val vpaPattern = Pattern.compile(
+                  """([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)""",
+                  Pattern.CASE_INSENSITIVE
+              )
+
+              private val merchantPatterns = listOf(
+                  Pattern.compile("""(?:to|towards|at|paid to|vpa)\s+([A-Za-z0-9\s&.'\-]{2,30}?)(?:\s+on|\s+ref|\s+upi|\s+avl|\s+bal|\s+dated|\.|,|$)""", Pattern.CASE_INSENSITIVE),
+                  Pattern.compile("""transfer\s+to\s+([A-Za-z0-9\s&.'\-]{2,30}?)(?:\s+ref|\s+on|\.|,|$)""", Pattern.CASE_INSENSITIVE)
+              )
+
+              private val accountPattern = Pattern.compile(
+                  """(?:a/c|acct|card|ending|xx)\s*([xX]*\d{3,4})""",
+                  Pattern.CASE_INSENSITIVE
+              )
+
+              fun parse(smsBody: String, sender: String, timestamp: Long = System.currentTimeMillis()): ParsedTransaction? {
+                  val lowerText = smsBody.lowercase()
+
+                  val isDebit = debitKeywords.any { lowerText.contains(it) }
+                  val isCredit = creditKeywords.any { lowerText.contains(it) }
+
+                  if (!isDebit && !isCredit) return null
+                  val type = if (isDebit) TransactionType.DEBIT else TransactionType.CREDIT
+
+                  val amountMatcher = amountPattern.matcher(smsBody)
+                  var amount: Double? = null
+                  if (amountMatcher.find()) {
+                      val amtStr = (amountMatcher.group(1) ?: amountMatcher.group(2))?.replace(",", "")
+                      amount = amtStr?.toDoubleOrNull()
+                  }
+                  if (amount == null || amount <= 0.0) return null
+
+                  val refMatcher = refPattern.matcher(smsBody)
+                  val refNo = if (refMatcher.find()) refMatcher.group(1) else null
+
+                  val vpaMatcher = vpaPattern.matcher(smsBody)
+                  val vpa = if (vpaMatcher.find()) vpaMatcher.group(1) else null
+
+                  var merchant: String? = null
+                  for (pattern in merchantPatterns) {
+                      val m = pattern.matcher(smsBody)
+                      if (m.find()) {
+                          val candidate = m.group(1)?.trim()
+                          if (!candidate.isNullOrBlank() && !candidate.equals("vpa", ignoreCase = true) && candidate.length > 1) {
+                              merchant = candidate
+                              break
+                          }
+                      }
+                  }
+
+                  if (merchant.isNullOrBlank()) {
+                      merchant = vpa ?: if (lowerText.contains("upi")) "UPI Transaction" else "Bank Transaction"
+                  }
+
+                  merchant = merchant.replace(Regex("""(?i)\bvia\s+(phonepe|google\s*pay|gpay|paytm|cred|bhim|upi)\b"""), "").trim()
+                  merchant = merchant.replace(Regex("""(?i)\b(upi|ref|bal|avl|on|dated|dr|cr)\b"""), "").trim()
+                  if (merchant.isBlank()) merchant = "UPI Transfer"
+
+                  val accMatcher = accountPattern.matcher(smsBody)
+                  val account = if (accMatcher.find()) accMatcher.group(1) else null
+
+                  val mode = if (lowerText.contains("upi") || vpa != null) {
+                      PaymentMode.UPI
+                  } else if (lowerText.contains("card")) {
+                      PaymentMode.CARD
+                  } else if (lowerText.contains("netbanking") || lowerText.contains("neft") || lowerText.contains("imps")) {
+                      PaymentMode.NET_BANKING
+                  } else {
+                      PaymentMode.UPI
+                  }
+
+                  val category = CategoryClassifier.classify(merchant, smsBody, vpa)
+
+                  return ParsedTransaction(
+                      amount = amount,
+                      type = type,
+                      merchant = merchant.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() },
+                      category = category,
+                      paymentMode = mode,
+                      vpaOrRef = refNo ?: vpa,
+                      accountInfo = account,
+                      date = timestamp,
+                      rawSms = smsBody,
+                      sender = sender
+                  )
+              }
+          }
+          EOF
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
